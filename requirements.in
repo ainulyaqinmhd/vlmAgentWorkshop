@@ -1,0 +1,21 @@
+# Packages this project uses directly. requirements.txt is generated from this file
+# with exact, tested versions for every platform - install that one, not this.
+#
+# To regenerate (maintainers only):
+#   uv pip compile requirements.in --universal --python-version 3.12 -o requirements.txt
+
+# Web interface
+gradio==6.5.1
+
+# Talking to Ollama, images, maths
+requests>=2.31
+pillow>=10.0
+numpy>=1.26
+
+# Knowledge base: reading PDFs
+pypdf>=5.0
+
+# Research mode
+arxiv>=2.1
+beautifulsoup4>=4.12
+ddgs>=9.0,<10

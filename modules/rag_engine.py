@@ -1,99 +1,164 @@
 """
 Knowledge base (RAG engine)
-Loads the files in knowledge/, splits them into chunks, embeds them with Ollama,
-stores them in ChromaDB, and retrieves the chunks most relevant to a question.
+Loads the files in knowledge/, splits them into chunks, turns each chunk into an
+embedding (a list of numbers that captures its meaning) with Ollama, and finds the
+chunks closest in meaning to a question.
+
+The index is saved in knowledge_index/ and updated automatically on startup:
+new, edited and deleted files in knowledge/ are all picked up.
 """
 
+import json
 import os
-import shutil
 from typing import List, Optional
 
-from langchain_chroma import Chroma
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_core.documents import Document
-from langchain_ollama import OllamaEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+import numpy as np
+import requests
+from pypdf import PdfReader
 
-from .config import logger, CHROMA_DIR, EMBED_MODEL, OLLAMA_HOST, KNOWLEDGE_DIR, RAG_TOP_K
+from .config import logger, INDEX_DIR, EMBED_MODEL, OLLAMA_HOST, KNOWLEDGE_DIR, RAG_TOP_K, REQUEST_TIMEOUT
 
 TEXT_EXTENSIONS = (".md", ".txt")
 SUPPORTED_EXTENSIONS = (".pdf",) + TEXT_EXTENSIONS
 
-CHUNK_SIZE = 1500  # Characters per chunk
-CHUNK_OVERLAP = 300  # Characters shared between neighbouring chunks
+CHUNK_SIZE = 1500  # Max characters per chunk
 MIN_CHUNK_CHARS = 200  # Shorter chunks (stray headers, captions) are dropped
-FETCH_K = 25  # Candidates fetched before removing duplicates and keeping the top k
+EMBED_BATCH = 32  # Chunks sent to Ollama per request
+
+# nomic-embed-text works best when documents and questions are labelled like this
+DOCUMENT_PREFIX = "search_document: "
+QUERY_PREFIX = "search_query: "
+
+
+def embed(texts: List[str], prefix: str) -> np.ndarray:
+    """Embed texts with Ollama; returns one normalized row per text"""
+    vectors = []
+    for i in range(0, len(texts), EMBED_BATCH):
+        batch = [prefix + t for t in texts[i:i + EMBED_BATCH]]
+        response = requests.post(f"{OLLAMA_HOST}/api/embed", json={"model": EMBED_MODEL, "input": batch},
+                                 timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        vectors.extend(response.json()["embeddings"])
+    matrix = np.array(vectors, dtype=np.float32)
+    # Normalize, so a dot product equals cosine similarity
+    return matrix / np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-12)
+
+
+def pack(texts: List[str], size: int = CHUNK_SIZE) -> List[str]:
+    """Combine paragraphs into chunks of at most `size` characters"""
+    chunks, current = [], ""
+    for text in texts:
+        for para in (p.strip() for p in text.split("\n\n")):
+            if not para:
+                continue
+            while len(para) > size:  # A single huge paragraph: cut it
+                chunks.append(para[:size])
+                para = para[size:]
+            if current and len(current) + len(para) + 2 > size:
+                chunks.append(current)
+                current = ""
+            current = f"{current}\n\n{para}" if current else para
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 class RAGEngine:
-    def __init__(self, persist_directory: str = CHROMA_DIR):
-        self.persist_directory = persist_directory
-        # Embeddings run inside Ollama, so no PyTorch or model download is needed here
-        self.embedding_function = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_HOST)
-        self.vector_store = None
-        if os.path.exists(persist_directory):
-            self.vector_store = Chroma(persist_directory=persist_directory, embedding_function=self.embedding_function)
-            logger.info(f"Loaded existing knowledge base from {persist_directory}")
+    def __init__(self, index_dir: str = INDEX_DIR):
+        self.index_dir = index_dir
+        self.chunks = []  # [{"source": file name, "text": chunk text}]
+        self.files = {}  # file name -> signature, to notice edits
+        self.vectors = np.zeros((0, 0), dtype=np.float32)
+        self._load()
+
+    # -------------------------------------------------------------------------
+    # Saving and loading the index
+    # -------------------------------------------------------------------------
+    def _load(self):
+        meta_path = os.path.join(self.index_dir, "chunks.json")
+        if not os.path.exists(meta_path):
+            return
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if meta.get("embed_model") != EMBED_MODEL:
+                logger.info("Embedding model changed, the knowledge base will be rebuilt")
+                return
+            self.chunks, self.files = meta["chunks"], meta["files"]
+            self.vectors = np.load(os.path.join(self.index_dir, "vectors.npy"))
+        except Exception as e:
+            logger.warning(f"Could not read the knowledge base index ({e}); it will be rebuilt")
+            self.chunks, self.files = [], {}
+
+    def _save(self):
+        os.makedirs(self.index_dir, exist_ok=True)
+        with open(os.path.join(self.index_dir, "chunks.json"), "w", encoding="utf-8") as f:
+            json.dump({"embed_model": EMBED_MODEL, "files": self.files, "chunks": self.chunks}, f, ensure_ascii=False)
+        np.save(os.path.join(self.index_dir, "vectors.npy"), self.vectors)
 
     # -------------------------------------------------------------------------
     # Ingestion
     # -------------------------------------------------------------------------
-    def get_ingested_sources(self) -> set:
-        """File paths already in the vector database"""
-        if not self.vector_store:
-            return set()
-        metadatas = self.vector_store._collection.get(include=["metadatas"]).get("metadatas", [])
-        return {meta["source"] for meta in metadatas if meta and "source" in meta}
-
     def ingest_directory(self, directory_path: str = KNOWLEDGE_DIR) -> str:
-        """Add every new .md, .txt and .pdf file in the directory to the knowledge base"""
-        if not os.path.exists(directory_path):
-            return f"Directory not found: {directory_path}"
+        """Bring the index up to date with the .md, .txt and .pdf files in the directory"""
+        os.makedirs(directory_path, exist_ok=True)
+        current = {}
+        for name in sorted(os.listdir(directory_path)):
+            if name.lower().endswith(SUPPORTED_EXTENSIONS):
+                stat = os.stat(os.path.join(directory_path, name))
+                current[name] = f"{stat.st_size}-{int(stat.st_mtime)}"
 
-        files = [
-            os.path.join(directory_path, f)
-            for f in sorted(os.listdir(directory_path))
-            if f.lower().endswith(SUPPORTED_EXTENSIONS)
-        ]
-        new_files = [f for f in files if f not in self.get_ingested_sources()]
-        if not new_files:
-            return f"Knowledge base up to date ({len(files)} files)."
+        changed = [n for n, sig in current.items() if self.files.get(n) != sig]
+        removed = [n for n in self.files if n not in current]
+        if not changed and not removed:
+            return f"Knowledge base up to date ({len(current)} files, {len(self.chunks)} chunks)."
 
-        documents = []
-        for path in new_files:
+        # Drop old chunks of edited or deleted files
+        stale = set(changed) | set(removed)
+        keep = [i for i, c in enumerate(self.chunks) if c["source"] not in stale]
+        self.chunks = [self.chunks[i] for i in keep]
+        self.vectors = self.vectors[keep] if len(keep) else np.zeros((0, 0), dtype=np.float32)
+        for name in stale:
+            self.files.pop(name, None)
+
+        # Chunk and embed new or edited files
+        new_chunks = []
+        for name in changed:
             try:
-                documents.extend(self._load_file(path))
+                texts = self._chunk_file(os.path.join(directory_path, name))
+                new_chunks.extend({"source": name, "text": t} for t in texts)
+                logger.info(f"Read {name}: {len(texts)} chunks")
             except Exception as e:
-                logger.error(f"Could not load {path}: {e}")
+                logger.error(f"Could not read {name}: {e}")
+                continue
+            self.files[name] = current[name]
 
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=CHUNK_SIZE,
-            chunk_overlap=CHUNK_OVERLAP,
-            # Split notes on '## ' headings first, so each chunk stays one concept
-            separators=["\n## ", "\n\n", "\n", ". ", "? ", "! ", " "],
-        )
-        chunks = [c for c in splitter.split_documents(documents) if len(c.page_content.strip()) >= MIN_CHUNK_CHARS]
-        if not chunks:
-            return "No usable text found in the new files."
+        if new_chunks:
+            logger.info(f"Embedding {len(new_chunks)} chunks with {EMBED_MODEL}...")
+            new_vectors = embed([c["text"] for c in new_chunks], DOCUMENT_PREFIX)
+            self.vectors = np.vstack([self.vectors, new_vectors]) if len(self.chunks) else new_vectors
+            self.chunks.extend(new_chunks)
 
-        if self.vector_store is None:
-            self.vector_store = Chroma.from_documents(
-                documents=chunks, embedding=self.embedding_function, persist_directory=self.persist_directory
-            )
-        else:
-            self.vector_store.add_documents(chunks)
-        return f"Added {len(new_files)} file(s) to the knowledge base as {len(chunks)} chunks."
+        self._save()
+        return (f"Knowledge base updated: {len(changed)} new/edited, {len(removed)} removed file(s). "
+                f"Total: {len(self.files)} files, {len(self.chunks)} chunks.")
 
-    def _load_file(self, path: str) -> List[Document]:
+    def _chunk_file(self, path: str) -> List[str]:
         if path.lower().endswith(TEXT_EXTENSIONS):
-            with open(path, "r", encoding="utf-8") as f:
-                return [Document(page_content=f.read(), metadata={"source": path})]
-
-        pages = PyPDFLoader(path).load()
-        if sum(len(p.page_content.strip()) for p in pages) < 100:
-            logger.warning(f"{os.path.basename(path)} has no text layer (scanned PDF?), skipping it")
-            return []
-        return self._filter_junk_pages(pages)
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            # One section per '## ' heading, so each chunk stays one concept
+            sections = text.split("\n## ")
+            sections = [sections[0]] + [f"## {s}" for s in sections[1:]]
+            chunks = [c for s in sections for c in pack([s])]
+        else:
+            pages = [page.extract_text() or "" for page in PdfReader(path).pages]
+            if sum(len(p.strip()) for p in pages) < 100:
+                logger.warning(f"{os.path.basename(path)} has no text layer (scanned PDF?), skipping it")
+                return []
+            pages = [p for i, p in enumerate(pages) if not self._is_junk_page(p, i, len(pages))]
+            chunks = pack(pages)
+        return [c for c in chunks if len(c.strip()) >= MIN_CHUNK_CHARS]
 
     @staticmethod
     def _is_junk_page(text: str, page_idx: int, total_pages: int) -> bool:
@@ -117,14 +182,6 @@ class RAGEngine:
         # Mostly page numbers, or nearly empty
         return (word_count < 80 and digit_ratio > 0.04) or word_count < 30
 
-    def _filter_junk_pages(self, pages: List[Document]) -> List[Document]:
-        total = len(pages)
-        kept = [p for p in pages if not self._is_junk_page(p.page_content, p.metadata.get("page", 0), total)]
-        if len(kept) < total:
-            source = os.path.basename(pages[0].metadata.get("source", "unknown"))
-            logger.info(f"Junk-page filter: removed {total - len(kept)}/{total} pages from {source}")
-        return kept
-
     # -------------------------------------------------------------------------
     # Retrieval
     # -------------------------------------------------------------------------
@@ -133,40 +190,17 @@ class RAGEngine:
         Return the k most relevant chunks as one text block, each labelled with its source.
         knowledge_files limits the search to those files in knowledge/ (e.g. one domain's notes).
         """
-        if not self.vector_store:
+        if not self.chunks:
             return ""
 
-        source_filter = None
-        if knowledge_files:
-            paths = [os.path.join(KNOWLEDGE_DIR, f) for f in knowledge_files if os.path.exists(os.path.join(KNOWLEDGE_DIR, f))]
-            if len(paths) == 1:
-                source_filter = {"source": paths[0]}
-            elif paths:
-                source_filter = {"$or": [{"source": p} for p in paths]}
+        scores = self.vectors @ embed([query_text], QUERY_PREFIX)[0]
+        candidates = [i for i, c in enumerate(self.chunks) if not knowledge_files or c["source"] in knowledge_files]
+        if not candidates:
+            # The domain's files aren't in the knowledge base; search everything instead
+            candidates = list(range(len(self.chunks)))
 
-        docs = self.vector_store.similarity_search(query_text, k=FETCH_K, filter=source_filter)
-        if not docs and source_filter:
-            # The domain's files had nothing relevant; search everything instead
-            docs = self.vector_store.similarity_search(query_text, k=FETCH_K)
-
-        # Drop duplicate chunks, keep the best k
-        unique, seen = [], set()
-        for doc in docs:
-            text = doc.page_content.strip()
-            if text not in seen:
-                seen.add(text)
-                unique.append(doc)
-        top = unique[:k]
-
+        top = sorted(candidates, key=lambda i: scores[i], reverse=True)[:k]
         logger.info(f"Retrieved {len(top)} chunks for: {query_text[:80]}")
         return "\n\n".join(
-            f"[Source: {os.path.splitext(os.path.basename(d.metadata.get('source', 'Unknown')))[0]}]\n{d.page_content}"
-            for d in top
+            f"[Source: {os.path.splitext(self.chunks[i]['source'])[0]}]\n{self.chunks[i]['text']}" for i in top
         )
-
-    def clear(self):
-        """Delete the whole knowledge base; it is rebuilt from knowledge/ on the next start"""
-        if self.vector_store:
-            self.vector_store.delete_collection()
-            self.vector_store = None
-        shutil.rmtree(self.persist_directory, ignore_errors=True)

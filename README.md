@@ -20,8 +20,11 @@ You need about **6 GB of free disk space** and **8 GB of RAM** or more.
 
 ### 1. Install the tools
 
-- **Python 3.10 or newer** (3.12 recommended): [python.org/downloads](https://www.python.org/downloads/).
+- **Python 3.14**: download it from the [Python 3.14.10 page](https://www.python.org/downloads/release/python-31410/)
+  (scroll to **Files**: *Windows installer (64-bit)*, *Windows installer (ARM64)* for Snapdragon laptops, or *macOS installer*).
   On Windows, tick **"Add Python to PATH"** in the installer.
+  > ⚠️ **Don't install Python 3.15** (the newest version on the python.org homepage). Some packages don't support it yet,
+  > and installation will fail. Python 3.12 and 3.13 also work, if you already have one of them.
 - **Git**: [git-scm.com](https://git-scm.com/downloads)
 - **Ollama**: [ollama.com/download](https://ollama.com/download). After installing, make sure it's running
   (on Windows and macOS it starts automatically and shows an icon in the system tray / menu bar).
@@ -42,9 +45,18 @@ This downloads about 4.3 GB. On an older laptop, use `qwen3.5:2b` instead (see [
 ```bash
 git clone https://github.com/ainulyaqinmhd/vlmAgentWorkshop.git
 cd vlmAgentWorkshop
-
-python -m venv venv
 ```
+
+Create a virtual environment (a private folder for this project's packages) with Python 3.14:
+
+```bash
+# Windows (PowerShell)
+py -3.14 -m venv venv
+# macOS / Linux
+python3.14 -m venv venv
+```
+
+> Using Python 3.12 or 3.13 instead? Change the version number, e.g. `py -3.13` or `python3.13`.
 
 Activate the virtual environment. You need to do this **every time** you open a new terminal:
 
@@ -55,7 +67,8 @@ Activate the virtual environment. You need to do this **every time** you open a 
 source venv/bin/activate
 ```
 
-You should now see `(venv)` at the start of your terminal line. Then install the packages:
+You should now see `(venv)` at the start of your terminal line. From now on, `python` means the
+project's Python on every system. Then install the packages:
 
 ```bash
 pip install -r requirements.txt
@@ -119,17 +132,16 @@ Upload image ──► Detect domain ──► Search knowledge base ──► B
 
 - **Prompts** live in [`prompts/`](prompts/) as text files, re-read on every request.
 - **Knowledge** lives in [`knowledge/`](knowledge/): short notes on each theory, split into chunks,
-  embedded with `nomic-embed-text` and stored in a local ChromaDB database (`chroma_db/`).
-  This is retrieval-augmented generation (RAG).
-- **Research mode** is an agent built with LangGraph: plan → search → answer each sub-question → combine.
+  embedded with `nomic-embed-text`, and stored as a small search index (`knowledge_index/`).
+  The most similar chunks are added to each prompt. This is retrieval-augmented generation (RAG).
+- **Research mode** is a simple agent loop (`modules/research_agent.py`): plan → search → answer each sub-question → combine.
 
 ## Adding your own knowledge
 
 1. Put a `.md`, `.txt` or `.pdf` file in `knowledge/`. In notes, use `## ` headings: each section is one concept.
 2. Optionally, add the file name to a domain's `knowledge_files` in [`modules/config.py`](modules/config.py)
    so it's searched when analyzing images of that domain. (Chat questions always search everything.)
-3. Restart the app. New files are added automatically. If you **edited** a file that was already added,
-   delete the `chroma_db` folder first so it's read again.
+3. Restart the app. New, edited and deleted files are picked up automatically.
 
 Only add material you have the right to share.
 
@@ -158,7 +170,8 @@ vlmAgentWorkshop/
 ├── STUDENT_TASKS.md           # Workshop task list and test log
 ├── main.py                    # Start the app
 ├── check_setup.py             # Checks your installation
-├── requirements.txt           # Python packages
+├── requirements.txt           # Python packages (exact versions, install this)
+├── requirements.in            # The packages we use directly (requirements.txt is generated from it)
 ├── prompts/                   # Every prompt the agent uses (edit these!)
 │   └── README.md              # Prompt Guide
 ├── knowledge/                 # Notes the agent retrieves from (add your own)
@@ -170,12 +183,12 @@ vlmAgentWorkshop/
 │   ├── prompts.py             # Loads prompt files and fills in {{placeholders}}
 │   ├── ollama_client.py       # Talks to Ollama (with images, streaming)
 │   ├── rag_engine.py          # Knowledge base: ingestion and retrieval
-│   ├── research_agent.py      # Research mode (LangGraph agent)
+│   ├── research_agent.py      # Research mode: plan, search, answer, combine
 │   ├── web_search.py, academic_search.py   # Research mode's search tools
 │   └── conversation.py        # Remembers the current image between messages
 ```
 
-Created when you run the app (not in git): `venv/`, `chroma_db/`, `uploads/`, `agent.log`.
+Created when you run the app (not in git): `venv/`, `knowledge_index/`, `uploads/`, `agent.log`.
 
 ---
 
@@ -183,13 +196,19 @@ Created when you run the app (not in git): `venv/`, `chroma_db/`, `uploads/`, `a
 
 | Problem | Fix |
 |---|---|
-| `python` is not recognized | Reinstall Python and tick "Add Python to PATH", or use `py` instead of `python` (Windows). |
+| **Installing packages fails** with `Microsoft Visual C++ 14.0 or greater is required`, `Failed to build pyyaml`, `metadata-generation-failed` or a Rust/compiler error | Your venv uses an unsupported Python (usually 3.15). Install Python 3.14 (step 1), **delete the `venv` folder**, and redo step 3 with `py -3.14` / `python3.14`. Check with `python --version` after activating. |
+| `py -3.14` says *No suitable Python runtime found*, or `python3.14: command not found` | Python 3.14 isn't installed yet (step 1). On Linux, install it with your package manager, e.g. `sudo apt install python3.14 python3.14-venv`. |
+| Ubuntu/Debian: `ensurepip is not available` when creating the venv | Run `sudo apt install python3.14-venv`, then create the venv again. |
+| `python` is not recognized | Activate the virtual environment first (step 3). If it still fails, reinstall Python and tick "Add Python to PATH". |
 | `ModuleNotFoundError` | The virtual environment isn't active. Activate it (step 3) and try again. |
-| `Connection refused` / the chat says "Is Ollama running?" | Start the Ollama app, or run `ollama serve` in another terminal. |
+| pip fails with SSL, proxy or timeout errors | Your network blocks or slows Python downloads (common on school/campus Wi-Fi). Try another network, such as a phone hotspot, or ask IT. |
+| `ollama pull` says the model *requires a newer version of Ollama* | Update Ollama: download it again from [ollama.com/download](https://ollama.com/download) and install over the old version. |
+| `Can't reach Ollama` when starting the app, or the chat says "Is Ollama running?" | Start the Ollama app, or run `ollama serve` in another terminal. |
 | `model "qwen3.5:4b" not found` | Run `ollama pull qwen3.5:4b` (or whichever model is set in the config). |
 | Answers are very slow | Use `qwen3.5:2b` and keep `OLLAMA_THINKING = False`. The first answer is always slower while the model loads. |
+| An iPhone photo (`.heic`) won't upload | Export or screenshot it as JPG/PNG first. On iPhone: Settings → Camera → Formats → *Most Compatible*. |
 | Research mode finds nothing | It needs internet access. Some school networks block search engines. |
-| The knowledge base seems out of date | Delete the `chroma_db/` folder and restart the app to rebuild it. |
+| The knowledge base seems out of date | Delete the `knowledge_index/` folder and restart the app to rebuild it. |
 | Port 7860 is already in use | Another copy of the app is running. Close it, or stop it with Ctrl+C in its terminal. |
 | Something else | Check the terminal window and `agent.log` for the error message. |
 

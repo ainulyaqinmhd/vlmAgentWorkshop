@@ -8,7 +8,7 @@ import time
 from typing import Dict, List, Any
 import requests
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from .config import logger
 
 
@@ -75,7 +75,8 @@ def perform_web_search(query: str, max_results: int = 3) -> List[Dict[str, str]]
                     logger.warning(f"No text content found at: {url}")
 
             except Exception as e:
-                logger.error(f"Failed to scrape {url}. Reason: {e}")
+                # Many sites block automated readers; skipping them is normal
+                logger.info(f"Skipped {url} (the site didn't allow reading it: {type(e).__name__})")
 
         logger.info(f"Web search returned content from {len(results_with_content)} results")
         return results_with_content

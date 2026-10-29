@@ -172,13 +172,13 @@ def download_and_extract_pdf(url: str, max_chars: int = 5000) -> str:
         response.raise_for_status()
         
         # Open PDF from memory
-        import fitz  # pymupdf
-        with fitz.open(stream=response.content, filetype="pdf") as doc:
-            text = ""
-            for page in doc:
-                text += page.get_text() + "\n"
-                if len(text) > max_chars:
-                    break
+        from io import BytesIO
+        from pypdf import PdfReader
+        text = ""
+        for page in PdfReader(BytesIO(response.content)).pages:
+            text += (page.extract_text() or "") + "\n"
+            if len(text) > max_chars:
+                break
         
         # Clean text
         text = text[:max_chars].replace("\n", " ").strip()
@@ -186,6 +186,6 @@ def download_and_extract_pdf(url: str, max_chars: int = 5000) -> str:
         return text
         
     except Exception as e:
-        logger.error(f"Failed to download/extract PDF from {url}: {e}")
+        logger.info(f"Couldn't read the PDF at {url}, skipping it ({type(e).__name__})")
         return ""
 

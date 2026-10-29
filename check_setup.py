@@ -27,19 +27,23 @@ def check(name, fn, hint):
 
 
 def python_version():
-    if sys.version_info < (3, 10):
-        raise RuntimeError(f"found {sys.version.split()[0]}, need 3.10 or newer")
-    return sys.version.split()[0]
+    found = sys.version.split()[0]
+    if sys.version_info < (3, 12):
+        raise RuntimeError(f"found {found}, need 3.12, 3.13 or 3.14")
+    if sys.version_info >= (3, 15):
+        raise RuntimeError(f"found {found}, which is too new: some packages don't support it yet")
+    return found
 
 
 def packages():
-    import gradio, langchain_chroma, langchain_ollama, langgraph, PIL, requests  # noqa: F401
+    import gradio, numpy, pypdf, ddgs, arxiv, bs4, PIL, requests  # noqa: F401
     return f"gradio {gradio.__version__}"
 
 
 print("Checking your setup...\n")
 
-if not check("Python 3.10+", python_version, "Install Python 3.12 from python.org"):
+if not check("Python 3.12 - 3.14", python_version,
+             "Install Python 3.14 from python.org, then delete the venv folder and recreate it (see README step 3)"):
     sys.exit(1)
 if not check("Python packages", packages,
              "Activate the virtual environment, then run: pip install -r requirements.txt"):

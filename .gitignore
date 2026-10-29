@@ -7,7 +7,7 @@ env/
 .env
 
 # Generated at runtime
-chroma_db/
+knowledge_index/
 uploads/
 *.log
 

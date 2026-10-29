@@ -91,8 +91,7 @@ The agent grounds its answers in the notes in the `knowledge/` folder.
   makes them recede and strengthens the sense of depth.
   ```
   *(A section needs at least a few sentences; very short ones are skipped.)*
-- [ ] **Restart the app** (Ctrl+C in the terminal, then `python main.py`). New files are added at startup.
-  If you **edited** an existing file instead, delete the `chroma_db` folder before restarting so it's re-read.
+- [ ] **Restart the app** (Ctrl+C in the terminal, then `python main.py`). New and edited files are read at startup.
 - [ ] Ask: *"How can I use atmospheric perspective in my sketch?"*
 
 **Record:** was your note retrieved (check the Process log and Prompt sent tabs)? Did the answer use it?

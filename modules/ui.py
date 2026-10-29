@@ -9,6 +9,7 @@ import os
 import time
 
 import gradio as gr
+from PIL import ImageOps
 
 from . import conversation
 from .config import logger, DOMAINS, UPLOAD_FOLDER, PROJECT_ROOT, CHAT_HISTORY_MESSAGES, OLLAMA_MODEL, OLLAMA_VLM_MODEL, OLLAMA_THINKING
@@ -65,7 +66,9 @@ def analyze_image(image, domain_choice, critique, history):
     placeholder_added = False
     try:
         path = os.path.join(UPLOAD_FOLDER, "uploaded.png")
-        image.save(path)
+        # Apply the phone's rotation tag (EXIF) so the model sees the photo upright,
+        # and convert to RGB so CMYK/palette images can be saved as PNG
+        ImageOps.exif_transpose(image).convert("RGB").save(path)
 
         domain = domain_choice
         if domain == AUTO_DETECT:

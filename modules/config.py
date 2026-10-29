@@ -81,7 +81,7 @@ CHAT_HISTORY_MESSAGES = 6  # How many recent messages are sent along with each c
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPTS_DIR = os.path.join(PROJECT_ROOT, "prompts")
 KNOWLEDGE_DIR = os.path.join(PROJECT_ROOT, "knowledge")  # Notes and PDFs for RAG (.md, .txt, .pdf)
-CHROMA_DIR = os.path.join(PROJECT_ROOT, "chroma_db")  # Vector database, rebuilt automatically
+INDEX_DIR = os.path.join(PROJECT_ROOT, "knowledge_index")  # Search index of knowledge/, updated automatically
 UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, "uploads")
 LOG_FILE = os.path.join(PROJECT_ROOT, "agent.log")
 
@@ -109,7 +109,7 @@ def setup_logging():
         ],
     )
     # Keep the terminal readable: hide per-request logs from HTTP libraries
-    for noisy in ("httpx", "urllib3", "chromadb", "arxiv"):
+    for noisy in ("httpx", "urllib3", "arxiv", "primp"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     return logging.getLogger("agent")
 
